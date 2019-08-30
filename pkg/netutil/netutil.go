@@ -152,6 +152,7 @@ func urlsEqual(ctx context.Context, lg *zap.Logger, a []url.URL, b []url.URL) (b
 	if err != nil {
 		return false, err
 	}
+	fmt.Printf("######## comparing %+v to %+v\n", urls[0], urls[1])
 	preva, prevb := a, b
 	a, b = urls[0], urls[1]
 	sort.Sort(types.URLs(a))
