@@ -34,7 +34,7 @@ var resolveTCPAddr = resolveTCPAddrDefault
 const retryInterval = time.Second
 
 // taken from go's ResolveTCP code but uses configurable ctx
-func resolveTCPAddrDefault(ctx context.Context, addr string) (*net.TCPAddr, error) {
+func resolveTCPAddrDefault(ctx context.Context, addr string) ([]net.TCPAddr, error) {
 	host, port, serr := net.SplitHostPort(addr)
 	if serr != nil {
 		return nil, serr
@@ -44,20 +44,23 @@ func resolveTCPAddrDefault(ctx context.Context, addr string) (*net.TCPAddr, erro
 		return nil, perr
 	}
 
-	var ips []net.IPAddr
+	var addrs []net.TCPAddr
 	if ip := net.ParseIP(host); ip != nil {
-		ips = []net.IPAddr{{IP: ip}}
+		addrs = append(addrs, net.TCPAddr{IP: ip, Port: portnum})
 	} else {
 		// Try as a DNS name.
+		net.DefaultResolver = &net.Resolver{}
 		ipss, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 		if err != nil {
 			return nil, err
 		}
-		ips = ipss
+
+		for _, ip := range ipss {
+			addrs = append(addrs, net.TCPAddr{IP: ip.IP, Port: portnum, Zone: ip.Zone})
+		}
 	}
-	// randomize?
-	ip := ips[0]
-	return &net.TCPAddr{IP: ip.IP, Port: portnum, Zone: ip.Zone}, nil
+
+	return addrs, nil
 }
 
 // resolveTCPAddrs is a convenience wrapper for net.ResolveTCPAddr.
@@ -74,24 +77,29 @@ func resolveTCPAddrs(ctx context.Context, lg *zap.Logger, urls [][]url.URL) ([][
 			}
 			nus[i] = *nu
 		}
-		for i, u := range nus {
+		resolvednus := make([]url.URL, 0, len(nus))
+		for _, u := range nus {
 			h, err := resolveURL(ctx, lg, u)
 			if err != nil {
 				return nil, fmt.Errorf("failed to resolve %q (%v)", u.String(), err)
 			}
-			if h != "" {
-				nus[i].Host = h
+			for _, host := range h {
+				if host != "" {
+					resolved := u
+					resolved.Host = host
+					resolvednus = append(resolvednus, resolved)
+				}
 			}
 		}
-		newurls = append(newurls, nus)
+		newurls = append(newurls, resolvednus)
 	}
 	return newurls, nil
 }
 
-func resolveURL(ctx context.Context, lg *zap.Logger, u url.URL) (string, error) {
+func resolveURL(ctx context.Context, lg *zap.Logger, u url.URL) ([]string, error) {
 	if u.Scheme == "unix" || u.Scheme == "unixs" {
 		// unix sockets don't resolve over TCP
-		return "", nil
+		return nil, nil
 	}
 	host, _, err := net.SplitHostPort(u.Host)
 	if err != nil {
@@ -101,21 +109,26 @@ func resolveURL(ctx context.Context, lg *zap.Logger, u url.URL) (string, error) 
 			zap.String("host", u.Host),
 			zap.Error(err),
 		)
-		return "", err
+		return nil, err
 	}
 	if host == "localhost" || net.ParseIP(host) != nil {
-		return "", nil
+		return []string{u.Host}, nil
 	}
 	for ctx.Err() == nil {
-		tcpAddr, err := resolveTCPAddr(ctx, u.Host)
+		tcpAddrs, err := resolveTCPAddr(ctx, u.Host)
 		if err == nil {
+			tcpStrings := make([]string, len(tcpAddrs))
+			for i := range tcpAddrs {
+				tcpStrings[i] = tcpAddrs[i].String()
+			}
+
 			lg.Info(
 				"resolved URL Host",
 				zap.String("url", u.String()),
 				zap.String("host", u.Host),
-				zap.String("resolved-addr", tcpAddr.String()),
+				zap.Strings("resolved-addrs", tcpStrings),
 			)
-			return tcpAddr.String(), nil
+			return tcpStrings, nil
 		}
 
 		lg.Warn(
@@ -135,11 +148,11 @@ func resolveURL(ctx context.Context, lg *zap.Logger, u url.URL) (string, error) 
 				zap.Duration("retry-interval", retryInterval),
 				zap.Error(err),
 			)
-			return "", err
+			return nil, err
 		case <-time.After(retryInterval):
 		}
 	}
-	return "", ctx.Err()
+	return nil, ctx.Err()
 }
 
 // urlsEqual checks equality of url.URLS between two arrays.
